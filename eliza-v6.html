@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Eliza TA — A GOFAI TA for Intro to Cogsci</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root { --ink:#0f172a; --muted:#6b7280; --bg:#f8fafc; --card:#ffffff; --accent:#0ea5e9; }
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:var(--bg);color:var(--ink)}
+  header{padding:18px 16px;text-align:center}
+  header h1{margin:0;font-size:24px}
+  header .sub{margin-top:4px;color:var(--muted)}
+  .wrap{max-width:980px;margin:0 auto 28px;padding:0 12px}
+  .card{background:var(--card);border-radius:12px;box-shadow:0 10px 24px rgba(15,23,42,.08);overflow:hidden}
+  .bar{background:#111827;color:#fff;padding:10px 14px;font-weight:700}
+  .content{padding:14px}
+  .chat{max-height:70vh;min-height:260px;overflow:auto;border:1px solid #e5e7eb;border-radius:10px;padding:8px;background:#fff}
+  .line{display:flex;gap:10px;margin:8px 0}
+  .user{justify-content:flex-end}
+  .bubble{max-width:78%;padding:10px 12px;border-radius:12px;white-space:pre-wrap}
+  .user .bubble{background:#e7f0ff}
+  .bot .bubble{background:#f3f4f6}
+  .io{margin-top:10px;display:grid;grid-template-columns:1fr auto;gap:8px}
+  input{padding:10px 12px;border:1px solid #e5e7eb;border-radius:10px;font-size:16px}
+  button{padding:10px 14px;border-radius:10px;border:0;background:var(--accent);color:white;font-weight:700;cursor:pointer}
+  .hint{color:var(--muted);font-size:13px;margin-top:8px;text-align:center}
+  code{background:#f1f5f9;padding:2px 6px;border-radius:6px}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>Eliza TA</h1>
+    <div class="sub">A GOFAI TA for Intro to Cogsci</div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <div class="bar">Talk to Eliza</div>
+    <div class="content">
+      <div id="chat" class="chat" aria-live="polite"></div>
+      <div class="io">
+        <input id="input" type="text" placeholder="Ask: office hours • vision • rods vs cones • halting problem • perceptron • H.M. • ‘I think…’ • ‘why…?’" />
+        <button id="send">Send</button>
+      </div>
+      <div class="hint">How well would this chatbot do in a Turing Test?</div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   CORE ENGINE UTILITIES (rotation, anti-repeat, reframing)
+   ============================================================ */
+const historyBot = [];
+const RECENT = 12;                    // window to avoid repeats
+const ruleCursors = Object.create(null);
+
+function rotate(ruleId, variants){
+  const idx = (ruleCursors[ruleId] || 0) % variants.length;
+  ruleCursors[ruleId] = idx + 1;
+  let out = variants[idx], tries = 0;
+  while (historyBot.slice(-RECENT).includes(out) && tries < variants.length){
+    const j = (ruleCursors[ruleId] || 0) % variants.length;
+    ruleCursors[ruleId] = j + 1;
+    out = variants[j]; tries++;
+  }
+  return out;
+}
+
+const REFRAME = [
+  "Could you clarify your question a bit?",
+  "What’s the concrete question you want answered?",
+  "Is this about logistics, content, or study strategy?",
+  "What’s the next piece of info that would help you most?",
+  "Give me a tiny example so I can answer precisely."
+];
+let refrIdx = 0;
+function reframe(){
+  const out = REFRAME[refrIdx % REFRAME.length]; refrIdx++; return out;
+}
+function emit(t){ historyBot.push(t); return t; }
+
+/* ============================================================
+   REFLECTIONS (classic ELIZA transformation)
+   ============================================================ */
+const REFLECTIONS = {
+  "am":"are","was":"were","i":"you","i'd":"you would","i've":"you have","i'll":"you will",
+  "my":"your","are":"am","you've":"I have","you'll":"I will","your":"my","yours":"mine",
+  "you":"I","me":"you"
+};
+function reflect(text){
+  return text.split(/\b/).map(w=>{
+    const r = REFLECTIONS[w.toLowerCase()];
+    if(!r) return w;
+    return w[0]===w.toUpperCase() ? r[0].toUpperCase()+r.slice(1) : r;
+  }).join("");
+}
+
+/* ============================================================
+   LAYER 1 — LOGISTICS (FAQ)
+   ============================================================ */
+const FACTS = {
+  meetings: "Class meetings: Monday & Wednesday, 2–3 pm, SZB 2.802.",
+  sections: "Sections: Friday 2–3 pm in RLP 0.122 OR 3–4 pm in RLP 0.106.",
+  instructor: "Instructor: Dr. David Beaver.",
+  instructorOffice: "Instructor office hours: Wednesday 10–12 in RLP 4.708, or by appointment.",
+  ta: "TA: Sampada Deshpande.",
+  taOffice: "TA office hours: Wednesday 3:00–6:00 in the West wing cubicle.",
+  grading: "Evaluation: 7 problem sets, 3 short written “cogsci files”, 10 in-section quizzes, an in-section midterm, an in-class final, and participatory contribution.",
+  participation: "Participation: discussion boards, office hours, in-class/section exercises & discussion, and effective coordination with peers/instructors.",
+  board: "Discussion board: perfect score = 100 points (details in section); you may continue earning points until the final class day.",
+  psets: "There are 7 problem sets.",
+  cogsci: "There are 3 short written “cogsci files”.",
+  quizzes: "There are 10 in-section quizzes.",
+  midterm: "There is an in-section midterm.",
+  final: "There is an in-class final.",
+  whereRLP: "RLP = Robert L. Patton Hall (rooms used: 0.122, 0.106; office RLP 4.708).",
+  whereSZB: "Lecture room: SZB 2.802."
+};
+
+const FAQ_RULES = [
+  {id:"oh-general",
+   p:/\b(office\s*hours?|oh)\b(?!.*\b(ta|sampada|deshpande|beaver|prof|professor|instructor)\b)/i,
+   v:[ FACTS.instructorOffice + " " + FACTS.taOffice,
+       "Office hours: " + FACTS.instructorOffice + " " + FACTS.taOffice ]},
+  {id:"oh-inst",
+   p:/\b(beaver|dr\.?\s*beaver|instructor|prof|professor)\b.*\b(office\s*hours?|oh)\b|\b(office\s*hours?|oh)\b.*\b(beaver|instructor|prof|professor)\b/i,
+   v:[ FACTS.instructorOffice, "Dr. Beaver’s OH: Wed 10–12 in RLP 4.708 (or by appointment)." ]},
+  {id:"oh-ta",
+   p:/\b(ta|sampada|deshpande)\b.*\b(office\s*hours?|oh)\b|\b(office\s*hours?|oh)\b.*\b(ta|sampada|deshpande)\b/i,
+   v:[ FACTS.taOffice, "TA OH (Sampada): Wed 3–6 in the West wing cubicle." ]},
+  {id:"whenclass",
+   p:/\b(class|lecture)\b.*\b(when|time)\b|\bwhen\b.*\b(class|lecture)\b/i,
+   v:[ FACTS.meetings, "Lecture is MW 2–3pm in SZB 2.802.", "MW 2–3 (SZB 2.802) is the regular time." ]},
+  {id:"whereclass",
+   p:/\bwhere\b.*\b(class|lecture)\b|\bSZB\b/i,
+   v:[ FACTS.meetings + " " + FACTS.whereSZB, "We meet in SZB 2.802 on Mon & Wed, 2–3pm." ]},
+  {id:"whensection",
+   p:/\b(section|discussion)\b.*\b(when|time)\b|\bwhen\b.*\b(section|discussion)\b/i,
+   v:[ FACTS.sections, "Friday sections: 2–3 (RLP 0.122) or 3–4 (RLP 0.106)." ]},
+  {id:"wheresection",
+   p:/\bwhere\b.*\b(section|discussion)\b|\bRLP\b(?!\s*4\.708)/i,
+   v:[ FACTS.sections + " " + FACTS.whereRLP, "RLP has your section rooms: 0.122 (2–3) and 0.106 (3–4)." ]},
+  {id:"who-inst", p:/\b(instructor)\b|\bprof(essor)?\b|\bbeaver\b/i, v:[ FACTS.instructor, "Dr. David Beaver is the instructor." ]},
+  {id:"who-ta",  p:/\bTA\b|\bSampada\b|\bDeshpande\b/i,           v:[ FACTS.ta, "Your TA is Sampada Deshpande." ]},
+  {id:"grading", p:/\bgrading|grade|assess|evaluation|evaluated\b/i,
+   v:[ FACTS.grading, "Grading: psets (7), cogsci files (3), quizzes (10), section midterm, in-class final, participation." ]},
+  {id:"part",    p:/\bparticipation|participatory\b/i,
+   v:[ FACTS.participation, "Participation includes discussion board, OH, and in-class/section work." ]},
+  {id:"board",   p:/\bdiscussion\s*board\b|\bQ\s*&\s*A\b|\bQA\b|\bboard\b.*\bpoints?\b/i,
+   v:[ FACTS.board, "Perfect on discussion board = 100 points; you can keep earning until the final class day." ]},
+  {id:"psets",   p:/\bproblem\s*sets?\b|\bpsets?\b/i,  v:[ FACTS.psets, "Seven problem sets across the term." ]},
+  {id:"cogsci",  p:/\bcogsci\b|\bfiles?\b/i,           v:[ FACTS.cogsci, "Three short written “cogsci files”." ]},
+  {id:"quizzes", p:/\bquiz|quizzes\b/i,               v:[ FACTS.quizzes, "There are ten in-section quizzes." ]},
+  {id:"midterm", p:/\bmidterm\b/i,                    v:[ FACTS.midterm, "There is an in-section midterm (date from your section)." ]},
+  {id:"final",   p:/\bfinal\b/i,                      v:[ FACTS.final, "There is an in-class final; see the registrar schedule." ]},
+  {id:"rlp",     p:/\bRLP\b/i,                        v:[ FACTS.whereRLP ]},
+  {id:"szb",     p:/\bSZB\b/i,                        v:[ FACTS.whereSZB ]},
+  {id:"overview",p:/\bsyllabus\b|\boverview\b|\ball\b|\beverything\b/i,
+   v:[ [FACTS.meetings, FACTS.sections, FACTS.instructor, FACTS.instructorOffice, FACTS.ta, FACTS.taOffice, FACTS.grading, FACTS.participation, FACTS.board].join(" ") ]}
+];
+
+/* ============================================================
+   LAYER 2 — CONTENTFUL CONCEPT ANSWERS (+ keyword memory)
+   ============================================================ */
+const keywordIndex = new Map();  // keyword → ruleId
+function registerKeywords(ruleId, list){ list.forEach(w=>keywordIndex.set(w.toLowerCase(), ruleId)); }
+function keywordLookup(q){
+  const toks = (q.toLowerCase().match(/[a-z0-9\.\-]+/g)||[]);
+  for(const t of toks){ if(keywordIndex.has(t)) return keywordIndex.get(t); }
+  return null;
+}
+
+const STUDY_RULES = [
+  { id:"retina",
+    keywords:["retina","rod","rods","cone","cones","photoreceptor","fovea","periphery","scotopic","photopic"],
+    p:/\b(retina|rod[s]?|cone[s]?|photoreceptor|fovea|peripher(y|al)|scotopic|photopic)\b/i,
+    v:[
+      "The retina runs two specialties: rods for low light and cones for color/detail. Pack the cones in the fovea; keep rods watching the periphery.",
+      "In bright light you’re living the cone life; at dusk the rods quietly take the wheel—no color, just survival."
+    ]},
+  { id:"opponent",
+    keywords:["opponent","afterimage","red-green","blue-yellow","color vision"],
+    p:/\b(opponent( |-)?process|afterimage|red-?green|blue-?yellow|color vision)\b/i,
+    v:[
+      "Your color system argues in pairs: red vs green, blue vs yellow. Stare too long at one side and the other wins the afterimage.",
+      "Cones feed channels that fight each other; perception is the referee."
+    ]},
+  { id:"categorical",
+    keywords:["categorical perception","VOT","phonemic","mcgurk"],
+    p:/\b(categorical perception|voice onset time|vot|phonemic restoration|mcgurk)\b/i,
+    v:[
+      "Speech compresses a messy continuum into neat categories—handy until the boundary fools you.",
+      "Vision can hijack hearing (hello, McGurk), and context can ‘restore’ missing sounds your ear never heard."
+    ]},
+  { id:"garden",
+    keywords:["garden path","parsing","minimal attachment","late closure"],
+    p:/\b(garden(-|\s)?path|parsing|minimal attachment|late closure)\b/i,
+    v:[
+      "Parsers make early bets. Garden-path sentences are what happens when the house wins and you must re-parse.",
+      "Your brain loves the simplest structure—until a word forces it to admit defeat and start over."
+    ]},
+  { id:"tmachine",
+    keywords:["turing","tm","tape","head","state"],
+    p:/\b(turing machine|tm\b|tape head|machine state)\b/i,
+    v:[
+      "A Turing machine is tiny rules with big consequences: read a symbol, write, move left/right, switch state—repeat until magic.",
+      "Being able to trace a few steps by hand is the point: computation from peanuts and string."
+    ]},
+  { id:"halting",
+    keywords:["halting","undecidable","decider"],
+    p:/\b(halting problem|undecidable|does it halt|halting|decider)\b/i,
+    v:[
+      "The halting problem says: no universal fortune-teller for programs. Some limits aren’t bugs—they’re the rules of the game.",
+      "Assume a perfect halting oracle, then make a program that disobeys it. Oops—contradiction."
+    ]},
+  { id:"perceptron",
+    keywords:["perceptron","threshold","linear","weights","bias","activation"],
+    p:/\b(perceptron|threshold unit|linear(ly)? separable|activation|weights?|bias)\b/i,
+    v:[
+      "A perceptron sums weighted inputs and fires if the total clears a bar. Great for clean lines; messy for XOR.",
+      "One layer draws a line; many layers draw the world."
+    ]},
+  { id:"hebb-backprop",
+    keywords:["hebb","backprop","gradient","mlp","fire together"],
+    p:/\b(hebb(ian)?|fire together wire together|back-?prop(agation)?|gradient|multi-?layer|mlp)\b/i,
+    v:[
+      "Hebb: when neurons party together, they stay friends. Backprop: when outputs err, teach every layer why.",
+      "Correlations grow synapses; gradients sculpt them."
+    ]},
+  { id:"reinforcement",
+    keywords:["reinforcement","policy","reward","value","q-learning","explore","exploit"],
+    p:/\b(reinforcement learning|policy|reward signal|value function|q-?learning|explore|exploit)\b/i,
+    v:[
+      "RL agents juggle curiosity and payoff. Explore to learn the map; exploit to cash in.",
+      "A value function is your guess about future goodies—good guesses make good choices."
+    ]},
+  { id:"memory-systems",
+    keywords:["memory","declarative","episodic","semantic","procedural","implicit","priming","retrieval","encoding"],
+    p:/\b(declarative|episodic|semantic|procedural|implicit|priming|retrieval|encoding|storage)\b/i,
+    v:[
+      "Memory isn’t a file cabinet; it’s a rebuild. Declarative facts are handy, procedural skill is sticky.",
+      "Priming nudges you quietly; retrieval cues can pull whole stories out by a single thread."
+    ]},
+  { id:"hm",
+    keywords:["H.M.","henry molaison","anterograde","hippocampus"],
+    p:/\b(h\.?m\.?|henry molaison|anterograde amnesia|hippocampus)\b/i,
+    v:[
+      "H.M. taught us the hippocampus stamps new declarative memories. His skills improved; his episodes didn’t stick.",
+      "Different memory systems, different fates—same person."
+    ]},
+  { id:"all-or-none",
+    keywords:["all-or-none","action potential","threshold","spike","rate"],
+    p:/\ball(-|\s)?or(-|\s)?none|action potential|threshold spike\b/i,
+    v:[
+      "Neurons don’t do half-spikes. They go or they don’t; the story is told in rate, not height.",
+      "Strength is in numbers and timing, not in timid spikes."
+    ]},
+  { id:"emotion",
+    keywords:["james-lange","cannon-bard","two-factor","duchenne","primary","secondary","appraisal"],
+    p:/\b(james(-|\s)?lange|cannon(-|\s)?bard|two(-|\s)?factor|duchenne|primary (vs|and) secondary|appraisal)\b/i,
+    v:[
+      "Emotion can start in the body, arrive with the feeling, or borrow a label from context—pick your theory, defend your evidence.",
+      "A Duchenne smile is the face forgetting to fake it."
+    ]},
+  { id:"nativism-ug",
+    keywords:["universal grammar","UG","critical period","nativism","empiricism","overextension","prototype","exemplar","schema"],
+    p:/\b(universal grammar|UG\b|critical period|nativism|empiricism|over-?extension|prototype|exemplar|schema)\b/i,
+    v:[
+      "Language grows in constrained soil: nature, nurture, and a ticking clock. Your task is to weigh the evidence.",
+      "Prototypes feel central; exemplars remember the details; schemas set the stage before you enter."
+    ]},
+  { id:"cnn",
+    keywords:["receptive field","center-surround","retinotopic","edge","cnn","convolution"],
+    p:/\b(center(-|\s)?surround|retinotopic|receptive field|edge detection|cnn|convolution(al)?)\b/i,
+    v:[
+      "Early vision loves edges; CNNs bottle that trick and stack it until ‘catness’ appears.",
+      "Retinotopy keeps the neighborhood together while features get fancy."
+    ]},
+  { id:"decision",
+    keywords:["utility","prospect","loss aversion","framing","risk"],
+    p:/\b(utility|prospect theory|loss aversion|framing|risk (aversion|seeking))\b/i,
+    v:[
+      "Value is how it feels, not just what it is. Frames bend choices; losses loom larger than wins.",
+      "Prospect Theory draws an S-curve through your heart and your wallet."
+    ]}
+];
+// seed keyword memory
+STUDY_RULES.forEach(r => registerKeywords(r.id, r.keywords));
+
+/* ============================================================
+   LAYER 3 — GENERIC / HUMOR / EVASION (interleaved)
+   - Targets common words; mixes contentful, evasive, and playful lines.
+   - Designed to rotate, not repeat, and feel conversational.
+   ============================================================ */
+const GENERIC_RULES = [
+  // vision / eye
+  {id:"vision", p:/\b(vision|see|seeing|sight|visual)\b/i, v:[
+    "Vision is half in your eyes and half in your expectations—your brain edits the world before you even notice.",
+    "The eye is wet hardware; the mind is the firmware no one documented.",
+    "Do we really have to talk about that? Fine: edges first, meanings later.",
+    "Where do you think you could look that up—your notes, a diagram, or a friend’s sketch?"
+  ]},
+  {id:"eye", p:/\b(eye|pupil|iris|lens)\b/i, v:[
+    "The lens does the focusing; the retina does the thinking-about-light part.",
+    "Your pupils negotiate between photons and gossip.",
+    "You’re giving me a headache—also known as ‘too much screen, not enough blinking.’",
+    "Have we covered that in class yet, or are you speedrunning the syllabus?"
+  ]},
+
+  // think / know / understand
+  {id:"think", p:/\b(think|thought|idea)\b/i, v:[
+    "Do you really think that, or are you just saying it out loud to see how it sounds?",
+    "Thinking is a collaboration between you and your future self who has more data.",
+    "Where in your notes would that idea live?",
+    "If you had to bet coffee on it, would you still think that?"
+  ]},
+  {id:"know", p:/\b(know|knew|knowledge)\b/i, v:[
+    "Knowing is when prediction gets boringly accurate.",
+    "If you ‘know’ it, could you teach it in two sentences?",
+    "Check the syllabus—annoying advice that is usually correct."
+  ]},
+  {id:"understand", p:/\b(understand|understood|makes sense)\b/i, v:[
+    "Understanding is when the example builds itself in your head.",
+    "If it ‘makes sense,’ explain it to me like I’m a sleep-deprived classmate.",
+    "Do we really have to talk about that? (Yes. We do.)"
+  ]},
+
+  // memory / learn
+  {id:"remember", p:/\b(remember|forget|forgot)\b/i, v:[
+    "Memory rebuilds; it doesn’t replay. Write down what you want Future-You to rebuild.",
+    "Forgotten ≠ gone. It’s just hiding behind the wrong cue."
+  ]},
+  {id:"learn", p:/\b(learn|learning|study|studying)\b/i, v:[
+    "Learning starts when confusion becomes a checklist.",
+    "Two short sessions beat one heroic cram—science and sanity agree.",
+    "Where could you try a 10-minute test of that idea?"
+  ]},
+
+  // problem / question / answer
+  {id:"problem", p:/\b(problem|stuck|blocked)\b/i, v:[
+    "Shrink the problem until it’s slightly embarrassing to avoid.",
+    "What’s the smallest next step that would be obviously progress?",
+    "Office hours were invented for this exact feeling."
+  ]},
+  {id:"question", p:/\b(question|ask|doubt)\b/i, v:[
+    "Good question. What answer would actually change your next action?",
+    "Can you make it concrete with a tiny example?",
+    "Where do you think you could look that up?"
+  ]},
+  {id:"answer", p:/\b(answer|solution|explain)\b/i, v:[
+    "If I hand you the answer, will your future self forgive me?",
+    "Explain it badly first; we’ll tidy later."
+  ]},
+
+  // brain / mind / body / language / computer
+  {id:"brain", p:/\b(brain|neuron|synapse)\b/i, v:[
+    "Your brain is a committee with loud opinions and slow minutes.",
+    "Neurons gossip in spikes; meaning is the rumor that sticks.",
+    "You say ‘brain’—do you mean hardware, algorithm, or story?"
+  ]},
+  {id:"mind", p:/\b(mind|mental|thoughts)\b/i, v:[
+    "The mind is the user interface we give ourselves.",
+    "Is this about experience, explanation, or control?"
+  ]},
+  {id:"body", p:/\b(body|embodied|sensorimotor)\b/i, v:[
+    "Your body does the math your mind claims credit for.",
+    "Try doing the problem while walking; sometimes legs unlock ideas."
+  ]},
+  {id:"language", p:/\b(language|word|speech|sentence)\b/i, v:[
+    "Language is compression with attitude.",
+    "If meaning is shared prediction, words are just the invitations."
+  ]},
+  {id:"computer", p:/\b(computer|machine|algorithm|code)\b/i, v:[
+    "Computers are honest: they do exactly what you told them, which is rarely what you meant.",
+    "Algorithm first, code second. Coffee optional but recommended."
+  ]},
+
+  // small talk / banter (lightly unprofessional)
+  {id:"coffee", p:/\b(coffee|caffeine|tea|espresso|latte)\b/i, v:[
+    "Hydration, then coffee, then decisions.",
+    "If I had a dollar for every ‘quick question,’ I’d buy a better espresso machine."
+  ]},
+  {id:"headache", p:/\b(headache|migraine|ache)\b/i, v:[
+    "You’re giving me a headache—and I say that with affection.",
+    "My migraine aura is composing abstract art again. Proceed gently."
+  ]},
+  {id:"sleep", p:/\b(sleep|tired|exhausted|insomnia)\b/i, v:[
+    "Sleep is a study technique disguised as not studying.",
+    "Naps are time-travel to smarter versions of you."
+  ]},
+  {id:"weather", p:/\b(weather|rain|hot|cold|storm)\b/i, v:[
+    "Weather is the sky live-blogging. Indoors might be your best lab today.",
+    "Hot tip: libraries have fewer storms."
+  ]},
+  {id:"syllabus", p:/\b(syllabus|canvas|gradebook)\b/i, v:[
+    "Check the syllabus. I know, I know—but also: it works.",
+    "Canvas misbehaving? Screenshot the error, email the file, breathe."
+  ]},
+
+  // deflection / meta
+  {id:"deflect1", p:/\b(idk|i don't know|no idea)\b/i, v:[
+    "Pick a guess you’d be willing to revise.",
+    "Not knowing is fine; not trying is expensive."
+  ]},
+  {id:"deflect2", p:/\b(help|assist|can you)\b/i, v:[
+    "I can nudge. You have to push.",
+    "Tell me the smallest stuck piece; that’s where we begin."
+  ]},
+  {id:"rephrase", p:/\b(what do you mean|clarify|be specific|unsure)\b/i, v:[
+    "Say it messily. We’ll clean later.",
+    "Give me a noun and a verb and we’re off."
+  ]}
+];
+
+/* ============================================================
+   LAYER 4 — CLASSIC ELIZA (backstop)
+   ============================================================ */
+const ELIZA_RULES = [
+  {id:"hi", p:/\b(hello|hi|hey|howdy|good (morning|afternoon|evening))\b/i, v:[
+    "Hello. What would you like to discuss?",
+    "Hi—what’s on your mind about the course?",
+    "Hey there. What’s your question?",
+    "Hello! Logistics, content, or study strategy?"
+  ]},
+  {id:"empty", p:/^$/i, v:[
+    "Please say a few words.",
+    "I’m listening—type a sentence or two.",
+    "Give me a hint about the topic."
+  ]},
+  {id:"iam", p:/\bi am (.*)/i, v:[
+    m=>"How long have you been " + reflect(m[1]) + "?",
+    m=>"What makes you feel you are " + reflect(m[1]) + "?",
+    m=>"Does being " + reflect(m[1]) + " help or hinder your work?"
+  ]},
+  {id:"im", p:/\bi'm (.*)/i, v:[
+    m=>"How does being " + reflect(m[1]) + " affect your work here?",
+    m=>"When did you start feeling " + reflect(m[1]) + "?",
+    m=>"What do you do when you notice you’re " + reflect(m[1]) + "?"
+  ]},
+  {id:"ineed", p:/\bi need (.*)/i, v:[
+    m=>"Why do you need " + reflect(m[1]) + "?",
+    m=>"How would getting " + reflect(m[1]) + " help you?",
+    m=>"What’s step one toward " + reflect(m[1]) + "?"
+  ]},
+  {id:"iwant", p:/\bi want (.*)/i, v:[
+    m=>"What would having " + reflect(m[1]) + " do for you?",
+    m=>"How could you start toward " + reflect(m[1]) + " today?",
+    m=>"If you had " + reflect(m[1]) + " already, what would be different?"
+  ]},
+  {id:"ifeel", p:/\bi feel (.*)/i, v:[
+    m=>"Do you often feel " + reflect(m[1]) + "?",
+    m=>"What do you think leads you to feel " + reflect(m[1]) + "?",
+    m=>"If a friend felt " + reflect(m[1]) + ", what would you suggest?"
+  ]},
+  {id:"ithink", p:/\bi think (.*)/i, v:[
+    m=>"Do you really think " + reflect(m[1]) + "?",
+    m=>"What evidence supports that you think " + reflect(m[1]) + "?",
+    m=>"If that’s true, what follows?"
+  ]},
+  {id:"cannot", p:/\bi (can't|cannot) (.*)/i, v:[
+    m=>"What makes you believe you cannot " + reflect(m[2]) + "?",
+    m=>"Have you tried a smaller step toward " + reflect(m[2]) + "?",
+    m=>"What would make " + reflect(m[2]) + " 10% easier?"
+  ]},
+  {id:"dont", p:/\bi (don't|do not) (.*)/i, v:[
+    m=>"Why don't you " + reflect(m[2]) + "?",
+    m=>"What would happen if you did " + reflect(m[2]) + "?",
+    m=>"What’s standing between you and " + reflect(m[2]) + "?"
+  ]},
+  {id:"because", p:/\bbecause (.*)/i, v:[
+    "Is that the real reason?",
+    "What other reasons might there be?",
+    "If not because of that, what else?"
+  ]},
+  {id:"why", p:/\bwhy\b(.*)/i, v:[
+    "What answer are you hoping for?",
+    "What makes that important right now?",
+    "If you had to guess, what’s your own reason?"
+  ]},
+  {id:"questionmark", p:/\?$/i, v:[
+    "Why do you ask?",
+    "What kind of answer would help most?",
+    "What do you already suspect?"
+  ]},
+  {id:"default", p:/.*/i, v:[
+    "Could you clarify your question?",
+    "Please go on.",
+    "What’s the smallest piece we can solve now?"
+  ]}
+];
+
+/* ============================================================
+   DISPATCH: FAQ → STUDY → GENERIC → KEYWORD → ELIZA
+   ============================================================ */
+function runRules(q, RULES){
+  for(const r of RULES){
+    const m = q.match(r.p);
+    if(m){
+      const outs = r.v.map(v => typeof v==="function" ? v(m) : v);
+      const text = rotate(r.id, outs);
+      if(r.keywords) registerKeywords(r.id, r.keywords); // keep keywords "warm"
+      return emit(text);
+    }
+  }
+  return null;
+}
+function runKeywordFallback(q){
+  const id = keywordLookup(q);
+  if(!id) return null;
+  const r = STUDY_RULES.find(x=>x.id===id);
+  if(!r) return null;
+  const text = rotate(r.id, r.v);
+  registerKeywords(r.id, r.keywords);
+  return emit(text);
+}
+
+/* ============================================================
+   UI WIRING
+   ============================================================ */
+const chat = document.getElementById("chat");
+const input = document.getElementById("input");
+const send  = document.getElementById("send");
+
+function add(text, who){
+  const row = document.createElement("div");
+  row.className = "line " + (who==="user" ? "user" : "bot");
+  const b = document.createElement("div"); b.className = "bubble"; b.textContent = text;
+  row.appendChild(b); chat.appendChild(row); chat.scrollTop = chat.scrollHeight;
+}
+
+function respond(){
+  const q = input.value.trim();
+  if(!q) return;
+  add(q, "user"); input.value = "";
+
+  let a = runRules(q, FAQ_RULES);
+  if(!a) a = runRules(q, STUDY_RULES);
+  if(!a) a = runRules(q, GENERIC_RULES);      // interleaved fun + content
+  if(!a) a = runKeywordFallback(q);
+  if(!a) a = runRules(q, ELIZA_RULES);
+
+  // anti-repeat fallback
+  if(historyBot.slice(-RECENT).filter(x=>x===a).length > 1){
+    a = emit(reframe());
+  }
+  setTimeout(()=> add(a, "bot"), 60);
+}
+
+send.addEventListener("click", respond);
+input.addEventListener("keydown", e=>{ if(e.key==="Enter") respond(); });
+
+// opening line
+add(emit("Hello! Ask about office hours, sections, grading, or any cogsci concept. I’m only mildly caffeinated."), "bot");
+</script>
+</body>
+</html>
